@@ -2,9 +2,6 @@
 	--bf-full-app-height: 100vh;
 	--bf-safe-area-inset-top: env(safe-area-inset-top);
 	--bf-safe-area-inset-bottom: env(safe-area-inset-bottom);
-	--bf-full-app-height: 100vh;
-	--bf-safe-area-inset-top: env(safe-area-inset-top);
-	--bf-safe-area-inset-bottom: env(safe-area-inset-bottom);
 }
 [ios="true"][view="browser"][is-pwa-or-html5-ios="true"] {
 	--bf-full-app-height: 100%;
@@ -1254,10 +1251,6 @@ html[ios="true"][view="app"][storyboard-launch-images="true"] .notificationHolde
 	padding-top: 20px!important ;
 }
 
-html[view="app"][android="true"] .powered-by {
-	margin-bottom : calc(20px + var(--bf-safe-area-inset-bottom)) !important;
-}
-
 [ios="true"][view="app"][storyboard-launch-images="true"] #navbarContainer{
 	min-height:10% !important;
 }
@@ -2013,6 +2006,9 @@ html[type="app"][ios="true"][browser="Safari"][view="browser"] #appSearchDialog{
 	-webkit-overflow-scrolling: touch;
 	overflow: scroll;
 }
+[view="app"][storyboard-launch-images="true"] .app-search-plugin .tab-content {
+	margin-bottom: var(--bf-safe-area-inset-bottom);
+}
 
 .holder {
 	height: 100%;
@@ -2110,12 +2106,10 @@ nav.menu .core-content {
 }
 nav.menu .line-border-top {
 	border-top: 1px solid rgba(150,150,150,.3);
+	padding-bottom: 0 !important;
 }
 nav.menu .line-border-bottom {
 	border-bottom: 1px solid rgba(150,150,150,.3);
-}
-nav.menu .logout {
-	margin-bottom: 30px;
 }
 nav.menu .core-content a {
 	padding: 25px 27px;
@@ -2552,6 +2546,7 @@ label.custom-checkbox{
 	position: fixed;
 	bottom: 0;
 	width: 100%;
+	margin-bottom: calc(var(--bf-safe-area-inset-bottom));
 	pointer-events: none;
 }
 .bottom-alerts{
@@ -5264,4 +5259,8 @@ body:not(.splash) #splashScreenPreview {
 	width: 100%;
 	bottom: 0;
 	right: 0;
+}
+
+.menu-body-container .menu-scroll {
+	margin-bottom: max(var(--bf-safe-area-inset-bottom), 30px)
 }

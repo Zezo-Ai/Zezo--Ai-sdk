@@ -19,6 +19,14 @@
     color: var(--bf-theme-body-text) !important;
 }
 
+.swipeable-drawer-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    height: 100%;
+}
+
 .swipeable-drawer-header {
     width: 100%;
     position: sticky;
@@ -46,6 +54,14 @@
     max-height: 100%;
 }
 
+.swipeable-drawer:has(.swipeable-drawer-footer.swipeable-drawer-hidden) .swipeable-drawer-content {
+    padding-bottom: calc(var(--bf-safe-area-inset-bottom));
+}
+
+.swipeable-drawer-footer {
+    padding-bottom: calc(var(--bf-safe-area-inset-bottom));
+}
+
 .swipeable-drawer-hidden {
     display: none;
 }
@@ -58,4 +74,22 @@
     height: 100%;
     background-color: rgba(0, 0, 0, 0.50);
     z-index: 99; /* Behind the drawer */
+}
+
+.swipeable-drawer::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: calc(var(--bf-safe-area-inset-bottom) + 30px);
+    background: linear-gradient(to top, var(--bf-theme-background, #ffffff) 0%, transparent 100%);
+    pointer-events: none;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+}
+
+.swipeable-drawer.swipeable-drawer-fade-on-device-buttons::after {
+    opacity: 1;
 }
