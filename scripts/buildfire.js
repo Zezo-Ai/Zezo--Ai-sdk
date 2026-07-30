@@ -440,6 +440,8 @@ var buildfire = {
 		, 'geo.session._triggerOnSessionWatchChange'
         , 'analytics.injectAmplitude'
 		, 'services.camera.triggerOnPictureFrame'
+		, 'services.contract._ping'
+		, 'services.contract._runFunction'
 	]
 	, _postMessageHandler: function (e) {
 		if (e.source === window) {
@@ -5049,6 +5051,7 @@ var buildfire = {
 					buildfire.loadScript({ url, scriptId }, () => {
 						dynamicEngine.expressions.getContext = this._prepareContext; // overwrite the getContext to be suitable for the sdk environment
 						dynamicEngine.getGlobalSettings = buildfire.getGlobalSettings; // overwrite the getGlobalSettings to be suitable for the sdk environment
+						this._prepareContractService(dynamicEngine); // overwrite contracts.invoke to run through the contract service
 						_executeDynamicEngineQueue(dynamicEngine);
 					});
 				}
@@ -5057,6 +5060,42 @@ var buildfire = {
 						callback(null, dynamicEngine);
 					});
 					this._dynamicEngineQueue = [];
+				};
+			},
+			/**
+			 * _prepareContractService
+			 * @description Overwrite dynamicEngine.contracts.invoke so context.contract expressions run through
+			 * the contract service. The service (buildfire.services.contract) may not be loaded in a generic
+			 * content widget, so it is loaded on demand. loadScript() calls back immediately for an in-flight
+			 * <script> that hasn't executed yet, so concurrent invokes must share ONE load and queue until it's
+			 * ready — otherwise every invoke but the first is called back before the service exists and fails.
+			 * @private
+			 */
+			_prepareContractService(dynamicEngine) {
+				if (!dynamicEngine.contracts) return;
+				let contractServiceQueue = null;
+				const contractServiceUrl = buildfire.getContext().type == 'control'
+					? '../../../../scripts/buildfire/services/contract/contract.js'
+					: '../../../scripts/buildfire/services/contract/contract.js';
+				const hasContractService = () => !!(buildfire.services && buildfire.services.contract && buildfire.services.contract.invoke);
+				const ensureContractServiceLoaded = (callback) => {
+					if (hasContractService()) return callback(null);
+					if (contractServiceQueue) return contractServiceQueue.push(callback); // a load is already in flight
+					contractServiceQueue = [callback];
+					buildfire.loadScript({ url: contractServiceUrl, scriptId: 'buildfireContractService' }, () => {
+						const queued = contractServiceQueue;
+						contractServiceQueue = null;
+						const err = hasContractService() ? null : 'contract service is not available in this widget';
+						queued.forEach((readyCallback) => readyCallback(err));
+					});
+				};
+				// options is already { instanceId, functionName, options } — exactly what
+				// buildfire.services.contract.invoke wants, so pass it straight through
+				dynamicEngine.contracts.invoke = (options, callback) => {
+					ensureContractServiceLoaded((err) => {
+						if (err) return callback(err);
+						buildfire.services.contract.invoke(options, callback);
+					});
 				};
 			},
 			/**
