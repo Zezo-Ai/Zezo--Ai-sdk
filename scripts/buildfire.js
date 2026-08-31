@@ -4629,6 +4629,7 @@ var buildfire = {
 					filter: {
 						'_buildfire.index.date1': { $gte: params.fromDate.getTime() },
 					},
+					sort: { '_buildfire.index.date1': 1 },
 				},
 				'$$deletedUsers',
 				(err,result) => {
