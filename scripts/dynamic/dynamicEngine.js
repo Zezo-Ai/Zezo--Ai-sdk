@@ -90,6 +90,11 @@ const dynamicEngine = {
 								if (err) return console.error('Error occurred while fetching data: ', err);
 								dynamicEngine.triggerContextChange({contextProperty: 'datasource', data: res});
 							});
+							const usedContracts = request._context.contract['__usedInvocations__'];
+							dynamicEngine.contracts._fetchNeededContracts({usedContracts}, (err, res) => {
+								if (err) return console.error('Error occurred while invoking contract: ', err);
+								dynamicEngine.triggerContextChange({contextProperty: 'contract', data: res});
+							});
 							callback(null, {evaluatedExpression, evaluationRequest: request});
 						};
 
@@ -157,6 +162,7 @@ const dynamicEngine = {
 				dynamicEngine.expressions.getContext({request: options}, (err, context) => {
 					Object.assign(baseContext, context, options.extendedContext);
 					dynamicEngine.datasources._addDatasourcesData({context: baseContext});
+					dynamicEngine.contracts._addContractsData({context: baseContext});
 					callback(null, baseContext);
 				});
 			});
@@ -433,6 +439,75 @@ const dynamicEngine = {
 				}
 				callback(null, null);
 			});
+		}
+	},
+	contracts: {
+		// results of invoked contract operations, keyed by the alias used in the expression
+		contractsData: {},
+		// bookkeeping to avoid re-invoking the same operation on every re-evaluation
+		requestedContracts: {},
+		/**
+		* @desc Expose (context.contract) with an invoke() method that expressions call directly, e.g.
+		* context.contract?.invoke({ instanceId, functionName, options }). The call is recorded (so the
+		* engine can run it and re-evaluate) and returns the cached result — undefined until it resolves.
+		* The whole options object (including the args from the plugin.contract.json) rides inside the call,
+		* so the expression is self-contained and resolves the same way at runtime with no registry.
+		* @param {Object} options.context - The context that is being used in the evaluation process
+		* @private
+		*/
+		_addContractsData({context}) {
+			const usedInvocations = {};
+			context.contract = {
+				invoke(options) {
+					if (!options || !options.functionName) return undefined;
+					const key = JSON.stringify(options);
+					usedInvocations[key] = options;
+					return dynamicEngine.contracts.contractsData[key];
+				},
+				__usedInvocations__: usedInvocations
+			};
+		},
+		/**
+		* @desc Invoke only the operations the expression actually called. Each recorded call carries its
+		* own options ({instanceId, functionName, options}); the result is cached under the call's key so the
+		* re-evaluation picks it up.
+		* @param {Object} options.usedContracts - Recorded invoke() calls (key → options) from the evaluation
+		* @param {Function} callback - Returns the invoked operation's result (per call)
+		* @private
+		*/
+		_fetchNeededContracts({usedContracts}, callback) {
+			if (!usedContracts || Object.keys(usedContracts).length === 0) return;
+			for (let key in usedContracts) {
+				const options = usedContracts[key];
+				if (!options || !options.functionName) continue;
+				const record = this.requestedContracts[key];
+				// skip while an invoke is in flight (pending) or already resolved (done). A failed key is
+				// left pending:false/done:false, so it is retried whenever a later context change re-evaluates.
+				if (record && (record.pending || record.done)) continue;
+				this.requestedContracts[key] = { pending: true, done: false };
+				(function (key, options) {
+					dynamicEngine.contracts.invoke(options, (err, result) => {
+						const rec = dynamicEngine.contracts.requestedContracts[key] || {};
+						rec.pending = false;
+						if (err) {
+							return callback({ message: 'Failed to invoke contract \'' + options.functionName + '\'', details: err }, null);
+						}
+						rec.done = true;
+						dynamicEngine.contracts.contractsData[key] = result;
+						callback(null, result);
+					});
+				})(key, options);
+			}
+		},
+		/**
+		* @desc Run a single contract operation. Overridden per platform (web/app/sdk) to forward the call
+		* through the app's contract API; the default is a no-op for platforms without contract support.
+		* @param {Object} options - The invocation options ({instanceId, functionName, options})
+		* @param {Function} callback - Returns the operation's result
+		* @public
+		*/
+		invoke(options, callback) {
+			callback('contract invoke is not supported on this platform');
 		}
 	}
 };

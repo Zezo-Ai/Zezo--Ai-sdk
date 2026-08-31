@@ -440,6 +440,8 @@ var buildfire = {
 		, 'geo.session._triggerOnSessionWatchChange'
         , 'analytics.injectAmplitude'
 		, 'services.camera.triggerOnPictureFrame'
+		, 'services.contract._ping'
+		, 'services.contract._runFunction'
 	]
 	, _postMessageHandler: function (e) {
 		if (e.source === window) {
@@ -4365,8 +4367,104 @@ var buildfire = {
 				console.error(error);
 				buildfire.deeplink._data = queryString;
 			}
+			// navigating to an already-loaded plugin never reloads the frame, so this is the only place
+			// a contract call arriving that way gets dispatched
+			if (buildfire.deeplink._data && buildfire.deeplink._data.contractAction) {
+				buildfire.deeplink._runContractAction({ deeplinkData: buildfire.deeplink._data });
+			}
 			buildfire.eventManager.trigger('deeplinkOnUpdate', buildfire.deeplink._data);
 		},
+
+		/**
+		 * "contractAction" is a reserved key in the deeplink data: it means the app navigated here to
+		 * run one of this plugin's declared contract operations in its own, on-screen frame — it is not
+		 * ordinary deeplink data for the plugin to interpret. The SDK dispatches it to
+		 * window.widgetContract so every plugin gets identical handling for free.
+		 *
+		 * Payload shape: { contractAction: { functionName: String, parameters: Object } }
+		 *
+		 * @param {Object} data parsed deeplink data
+		 * @returns {Boolean} true when the payload was a contract call (and was handled here)
+		 */
+		/**
+		 * Run a contract operation delivered in this frame's deeplink data.
+		 * @param {Object} options { deeplinkData } — the parsed deeplink data, which carries the call
+		 *                          under its reserved "contractAction" key
+		 * @param {Function} [callback] (err, result) — errors are logged when no callback is given
+		 */
+		_runContractAction: function (options, callback) {
+			if (!callback) callback = function (err) { if (err) console.error(err); };
+			options = options || {};
+
+			var contractAction = options.deeplinkData && options.deeplinkData.contractAction;
+			if (!contractAction || !contractAction.functionName) return callback('no contract operation in this deeplink');
+
+			// Only what the plugin deliberately exposes can be called — a contract cannot reach arbitrary
+			// globals. Which namespace depends on where this page was loaded: a control page implements its
+			// operations on window.controlContract, a widget page on window.widgetContract. The path is what
+			// decides, the same test the contract service uses when it runs a function in a hidden frame.
+			var isControl = window.location && window.location.pathname.indexOf('/control/') >= 0;
+			var namespace = isControl ? 'controlContract' : 'widgetContract';
+
+			// the namespace lives in plugin.contract.js, which a plugin has no reason to load on every page
+			// view, so fetch it first and come back here once
+			if (!window[namespace] && !buildfire.deeplink._contractScriptLoaded) {
+				return buildfire.deeplink._ensurePluginContractLoaded(null, function () {
+					buildfire.deeplink._runContractAction(options, callback);
+				});
+			}
+
+			var operation = window[namespace] && window[namespace][contractAction.functionName];
+			if (typeof (operation) !== 'function') {
+				return callback('contract function "' + contractAction.functionName + '" was not found on window.' + namespace);
+			}
+
+			// the parameters are published as this frame's deeplink data as well as passed as arguments, so
+			// a function that reads its deeplink — how most plugins already take input — needs no changes
+			if (contractAction.parameters) buildfire.deeplink._data = contractAction.parameters;
+
+			try {
+				operation(contractAction.parameters || {}, callback);
+			} catch (e) {
+				callback('error running contract function "' + contractAction.functionName + '": ' + (e && e.message ? e.message : e));
+			}
+		},
+
+		// Make sure the plugin's own plugin.contract.js has been fetched — it defines
+		// window.widgetContract, and sits beside the page being served, so a relative path works
+		// wherever the plugin is hosted. Already settled means the callback runs straight away.
+		//
+		// Calls that arrive while the fetch is in flight wait for it rather than being turned away — a
+		// second operation must not fail just because the first one started the download.
+		_ensurePluginContractLoaded: function (options, callback) {
+			var deeplink = buildfire.deeplink;
+			if (deeplink._contractScriptLoaded) return callback();
+
+			deeplink._contractScriptWaiting.push(callback);
+			if (deeplink._contractScriptRequested) return; // already downloading; the queue gets drained below
+			deeplink._contractScriptRequested = true;
+
+			// settled either way: a plugin without the file must not leave callers waiting forever
+			var settle = function () {
+				deeplink._contractScriptLoaded = true;
+				var waiting = deeplink._contractScriptWaiting;
+				deeplink._contractScriptWaiting = [];
+				for (var i = 0; i < waiting.length; i++) waiting[i]();
+			};
+
+			var script = document.createElement('script');
+			script.src = 'plugin.contract.js';
+			script.onload = settle;
+			script.onerror = function () {
+				console.error('this plugin provides no plugin.contract.js to run its contract operations');
+				settle();
+			};
+			document.head.appendChild(script);
+		},
+		_contractScriptRequested: false,
+		_contractScriptLoaded: false,
+		_contractScriptWaiting: [],
+
 		_data: null
 	}
 	/// ref: https://github.com/BuildFire/sdk/wiki/Spinners
@@ -5049,6 +5147,7 @@ var buildfire = {
 					buildfire.loadScript({ url, scriptId }, () => {
 						dynamicEngine.expressions.getContext = this._prepareContext; // overwrite the getContext to be suitable for the sdk environment
 						dynamicEngine.getGlobalSettings = buildfire.getGlobalSettings; // overwrite the getGlobalSettings to be suitable for the sdk environment
+						this._prepareContractService(dynamicEngine); // overwrite contracts.invoke to run through the contract service
 						_executeDynamicEngineQueue(dynamicEngine);
 					});
 				}
@@ -5057,6 +5156,42 @@ var buildfire = {
 						callback(null, dynamicEngine);
 					});
 					this._dynamicEngineQueue = [];
+				};
+			},
+			/**
+			 * _prepareContractService
+			 * @description Overwrite dynamicEngine.contracts.invoke so context.contract expressions run through
+			 * the contract service. The service (buildfire.services.contract) may not be loaded in a generic
+			 * content widget, so it is loaded on demand. loadScript() calls back immediately for an in-flight
+			 * <script> that hasn't executed yet, so concurrent invokes must share ONE load and queue until it's
+			 * ready — otherwise every invoke but the first is called back before the service exists and fails.
+			 * @private
+			 */
+			_prepareContractService(dynamicEngine) {
+				if (!dynamicEngine.contracts) return;
+				let contractServiceQueue = null;
+				const contractServiceUrl = buildfire.getContext().type == 'control'
+					? '../../../../scripts/buildfire/services/contract/contract.js'
+					: '../../../scripts/buildfire/services/contract/contract.js';
+				const hasContractService = () => !!(buildfire.services && buildfire.services.contract && buildfire.services.contract.invoke);
+				const ensureContractServiceLoaded = (callback) => {
+					if (hasContractService()) return callback(null);
+					if (contractServiceQueue) return contractServiceQueue.push(callback); // a load is already in flight
+					contractServiceQueue = [callback];
+					buildfire.loadScript({ url: contractServiceUrl, scriptId: 'buildfireContractService' }, () => {
+						const queued = contractServiceQueue;
+						contractServiceQueue = null;
+						const err = hasContractService() ? null : 'contract service is not available in this widget';
+						queued.forEach((readyCallback) => readyCallback(err));
+					});
+				};
+				// options is already { instanceId, functionName, options } — exactly what
+				// buildfire.services.contract.invoke wants, so pass it straight through
+				dynamicEngine.contracts.invoke = (options, callback) => {
+					ensureContractServiceLoaded((err) => {
+						if (err) return callback(err);
+						buildfire.services.contract.invoke(options, callback);
+					});
 				};
 			},
 			/**
@@ -6167,8 +6302,18 @@ document.addEventListener('DOMContentLoaded', function (event) {
 			buildfire.appearance._forceCSSRender();
 	}, 1750);
 
-
-
+	// A contract call delivered by deeplink runs whether or not the plugin ever reads its deeplink
+	// data. By now the plugin's own scripts have loaded, so the function it names can be resolved.
+	if (window.parsedQuerystring && window.parsedQuerystring.dld) {
+		try {
+			var deeplinkData = JSON.parse(window.parsedQuerystring.dld);
+			if (deeplinkData && deeplinkData.contractAction) {
+				buildfire.deeplink._runContractAction({ deeplinkData: deeplinkData });
+			}
+		} catch (e) {
+			console.error('failed to read deeplink data for a contract call:', e);
+		}
+	}
 });
 
 document.addEventListener('resize', function (event) {
